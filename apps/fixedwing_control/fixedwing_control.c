@@ -380,11 +380,11 @@ static void calc_body_angular_rates(float roll, float pitch, float yaw, float ro
 static void calc_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, float yaw)
 {
 	rmatrix->m11 = cosf(yaw) * cosf(pitch);
-	rmatrix->m12 = (cosf(yaw) * sinf(pitch) * sinf(roll) + sinf(yaw) * cosf(roll));
-	rmatrix->m13 = (-cosf(yaw) * sinf(pitch) * cosf(roll)  + sinf(yaw) * sinf(roll));
+	rmatrix->m12 = cosf(yaw) * sinf(pitch) * sinf(roll) + sinf(yaw) * cosf(roll);
+	rmatrix->m13 = -cosf(yaw) * sinf(pitch) * cosf(roll)  + sinf(yaw) * sinf(roll);
 	rmatrix->m21 = -sinf(yaw) * cosf(pitch);
-	rmatrix->m22 = (-sinf(yaw) * sinf(pitch) * sinf(roll) + cosf(yaw) * cosf(roll));
-	rmatrix->m23 = (sinf(yaw) * sinf(pitch) * cosf(roll) + cosf(yaw) * sinf(roll));
+	rmatrix->m22 = -sinf(yaw) * sinf(pitch) * sinf(roll) + cosf(yaw) * cosf(roll);
+	rmatrix->m23 = sinf(yaw) * sinf(pitch) * cosf(roll) + cosf(yaw) * sinf(roll);
 	rmatrix->m31 = sinf(pitch);
 	rmatrix->m32 = -cosf(pitch) * sinf(roll);
 	rmatrix->m33 = cosf(pitch) * cosf(roll);
@@ -404,7 +404,9 @@ static void calc_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, f
 
 static void calc_angles_from_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, float yaw)
 {
-	// TODO
+	roll = atan2f(rmatrix->m33, rmatrix->m32);
+	pitch = atan2f(sqrtf(rmatrix->m32*rmatrix->m32+rmatrix->m33*rmatrix->m33), -rmatrix->m31);
+	yaw = atan2f(rmatrix->m11, rmatrix->m21);
 }
 
 /**
@@ -421,7 +423,15 @@ static void calc_angles_from_rotation_matrix(rmatrix_t * rmatrix, float roll, fl
 
 static void multiply_matrices(rmatrix_t * rmatrix1, rmatrix_t * rmatrix2, rmatrix_t * rmatrix3)
 {
-	// TODO
+	rmatrix3->m11 = rmatrix1->m11*rmatrix2->m11 + rmatrix1->m12*rmatrix2->m21 + rmatrix1->m13*rmatrix2->m31;
+	rmatrix3->m12 = rmatrix1->m11*rmatrix2->m21 + rmatrix1->m12*rmatrix2->m22 + rmatrix1->m13*rmatrix2->m23;
+	rmatrix3->m13 = rmatrix1->m11*rmatrix2->m31 + rmatrix1->m12*rmatrix2->m32 + rmatrix1->m13*rmatrix2->m33;
+	rmatrix3->m21 = rmatrix1->m21*rmatrix2->m11 + rmatrix1->m22*rmatrix2->m21 + rmatrix1->m23*rmatrix2->m31;
+	rmatrix3->m22 = rmatrix1->m21*rmatrix2->m21 + rmatrix1->m22*rmatrix2->m22 + rmatrix1->m23*rmatrix2->m23;
+	rmatrix3->m23 = rmatrix1->m21*rmatrix2->m31 + rmatrix1->m22*rmatrix2->m32 + rmatrix1->m23*rmatrix2->m33;
+	rmatrix3->m31 = rmatrix1->m31*rmatrix2->m11 + rmatrix1->m32*rmatrix2->m21 + rmatrix1->m33*rmatrix2->m31;
+	rmatrix3->m32 = rmatrix1->m31*rmatrix2->m21 + rmatrix1->m32*rmatrix2->m22 + rmatrix1->m33*rmatrix2->m31;
+	rmatrix3->m33 = rmatrix1->m31*rmatrix2->m31 + rmatrix1->m32*rmatrix2->m32 + rmatrix1->m33*rmatrix2->m33;
 }
 
 
