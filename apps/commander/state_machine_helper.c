@@ -503,7 +503,9 @@ uint8_t update_state_machine_mode_request(int status_pub, struct vehicle_status_
 	//}
 
 	/* Switch on HIL if in standby */
-	if ((current_status->state_machine == SYSTEM_STATE_STANDBY) && (mode & MAV_MODE_FLAG_HIL_ENABLED)) {
+	/* XXX */
+	if (((current_status->state_machine == SYSTEM_STATE_STANDBY) ||
+		(current_status->state_machine == SYSTEM_STATE_GROUND_READY))&& (mode & MAV_MODE_FLAG_HIL_ENABLED)) {
 		/* Enable HIL on request */
 		current_status->mode |= MAV_MODE_FLAG_HIL_ENABLED;
 		ret = OK;
@@ -513,7 +515,7 @@ uint8_t update_state_machine_mode_request(int status_pub, struct vehicle_status_
 
 	/* NEVER actually switch off HIL without reboot */
 	if ((current_status->mode & MAV_MODE_FLAG_HIL_ENABLED) && !(mode & MAV_MODE_FLAG_HIL_ENABLED)) {
-		fprintf(stderr, "[commander] DENYING request to switch of HIL. Please power cycle (safety reasons)\n");
+		fprintf(stderr, "[commander] DENYING request to switch off HIL. Please power cycle (safety reasons)\n");
 		ret = ERROR;
 	}
 

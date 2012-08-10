@@ -62,7 +62,7 @@ struct global_data_parameter_storage_t global_data_parameter_storage_d =  { /*.c
 			.param_names[PARAM_PID_YAWSPEED_LIM] = "PID_YAWSPD_LIM",
 			.param_needs_write[PARAM_PID_YAWSPEED_LIM] = false,
 
-			.param_values[PARAM_PID_ATT_P] = 0.3f,
+			.param_values[PARAM_PID_ATT_P] = 3.0f,
 			.param_names[PARAM_PID_ATT_P] = "PID_ATT_P",
 			.param_needs_write[PARAM_PID_ATT_P] = false,
 
@@ -70,7 +70,7 @@ struct global_data_parameter_storage_t global_data_parameter_storage_d =  { /*.c
 			.param_names[PARAM_PID_ATT_I] = "PID_ATT_I",
 			.param_needs_write[PARAM_PID_ATT_I] = false,
 
-			.param_values[PARAM_PID_ATT_D] = 0.1f,
+			.param_values[PARAM_PID_ATT_D] = 0.0f,
 			.param_names[PARAM_PID_ATT_D] = "PID_ATT_D",
 			.param_needs_write[PARAM_PID_ATT_D] = false,
 
@@ -126,11 +126,11 @@ struct global_data_parameter_storage_t global_data_parameter_storage_d =  { /*.c
 			.param_names[PARAM_AIRSPEED] = "AIRSPEED",
 			.param_needs_write[PARAM_AIRSPEED] = false,
 
-			.param_values[PARAM_WPLON] = -120.0f,
+			.param_values[PARAM_WPLON] = -1200000000,
 			.param_names[PARAM_WPLON] = "WPLON",
 			.param_needs_write[PARAM_WPLON] = false,
 
-			.param_values[PARAM_WPLAT] = 38.0f,
+			.param_values[PARAM_WPLAT] = 380000000,
 			.param_names[PARAM_WPLAT] = "WPLAT",
 			.param_needs_write[PARAM_WPLAT] = false,
 

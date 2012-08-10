@@ -67,18 +67,14 @@
 
 __EXPORT int fixedwing_control_main(int argc, char *argv[]);
 
-#define PID_DT 0.01f
-#define PID_SCALER 0.1f
+#define PID_DT 5e-3
+#define PID_SCALER 1.0f
 #define PID_DERIVMODE_CALC 0
 #define HIL_MODE 32
 #define AUTO -1000
 #define MANUAL 3000
 #define SERVO_MIN 1000
 #define SERVO_MAX 2000
-
-pthread_t control_thread;
-pthread_t nav_thread;
-pthread_t servo_thread;
 
 /**
  * Servo channels function enumerator used for
@@ -102,8 +98,8 @@ enum SERVO_CHANNELS_FUNCTION {
  * The plane data structure is the local storage of all the flight information of the aircraft
  */
 typedef struct {
-	double lat;
-	double lon;
+	int32_t lat;
+	int32_t lon;
 	float alt;
 	float vx;
 	float vy;
@@ -122,21 +118,10 @@ typedef struct {
 	float q;
 	float r;	/* body angular rates */
 
-	/* PID parameters*/
-
-	float Kp_att;
-	float Ki_att;
-	float Kd_att;
-	float Kp_pos;
-	float Ki_pos;
-	float Kd_pos;
-	float intmax_att;
-	float intmax_pos;
-
 	/* Next waypoint*/
 
-	float wp_x;
-	float wp_y;
+	int32_t wp_x;
+	int32_t wp_y;
 	float wp_z;
 
 	/* Setpoints */
@@ -151,6 +136,44 @@ typedef struct {
 	int mode;
 
 } plane_data_t;
+
+/**
+ * The PID structure.
+ */
+
+typedef struct {
+	/* PID parameters*/
+
+	float Kp_att;
+	float Ki_att;
+	float Kd_att;
+	float Kp_pos;
+	float Ki_pos;
+	float Kd_pos;
+	float intmax_att;
+	float intmax_pos;
+	float lerror;
+	float lderiv;
+
+} pid_s_t;
+
+/*
+ * Rotation matrix structure
+ */
+
+typedef struct {
+
+	float m11;
+	float m12;
+	float m13;
+	float m21;
+	float m22;
+	float m23;
+	float m31;
+	float m32;
+	float m33;
+
+} rmatrix_t;
 
 /**
  * The control_outputs structure.
@@ -175,34 +198,45 @@ typedef struct {
 /**
  * Generic PID algorithm with PD scaling
  */
-static float pid(float error, float error_deriv, uint16_t dt, float scaler, float K_p, float K_i, float K_d, float intmax);
+static float pid(float error, float error_deriv, float dt, float scaler, float K_p, float K_i, float K_d, float intmax, float lerror, float lderiv);
 
 /*
  * Output calculations
  */
 
 static void calc_body_angular_rates(float roll, float pitch, float yaw, float rollspeed, float pitchspeed, float yawspeed);
-static void calc_rotation_matrix(float roll, float pitch, float yaw, float x, float y, float z);
-static void calc_bodyframe_angles(float roll, float pitch, float yaw);
-static float calc_bearing(void);
-static float calc_roll_ail(void);
-static float calc_pitch_elev(void);
-static float calc_yaw_rudder(float hdg);
-static float calc_throttle(void);
-static float calc_gnd_speed(void);
-static void get_parameters(plane_data_t *plane_data);
-static float calc_roll_setpoint(void);
-static float calc_pitch_setpoint(void);
-static float calc_throttle_setpoint(void);
-static float calc_wp_distance(void);
-static void set_plane_mode(void);
+static void calc_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, float yaw);
+static void calc_angles_from_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, float yaw);
+static void multiply_matrices(rmatrix_t* rmatrix1, rmatrix_t* rmatrix2, rmatrix_t *rmatrix3);
+static float calc_bearing(plane_data_t *plane_data);
+static float calc_roll_ail(plane_data_t *plane_data, pid_s_t * pid_s);
+static float calc_pitch_elev(plane_data_t *plane_data, pid_s_t * pid_s);
+static float calc_yaw_rudder(plane_data_t *plane_data, pid_s_t * pid_s);
+static float calc_throttle(plane_data_t *plane_data, pid_s_t * pid_s);
+static float calc_gnd_speed(plane_data_t *plane_data);
+static void get_parameters(plane_data_t *plane_data, pid_s_t * pid_s);
+static float calc_roll_setpoint(float sp, plane_data_t *plane_data);
+static float calc_pitch_setpoint(float sp, plane_data_t *plane_data);
+static float calc_throttle_setpoint(plane_data_t *plane_data);
+static float calc_wp_distance(plane_data_t *plane_data);
+static void set_plane_mode(plane_data_t *plane_data);
 
 /****************************************************************************
  * Public Data
  ****************************************************************************/
 
+/*
+ * Global structure declarations
+ */
 plane_data_t plane_data;
 control_outputs_t control_outputs;
+pid_s_t pid_s;
+
+/*
+ * Rotation matrices for the control, attitude, and body frame attitude angles
+ */
+rmatrix_t rmatrix_att, rmatrix_c, rmatrix_b;
+
 float scaler = 1; //M_PI;
 
 /****************************************************************************
@@ -217,26 +251,23 @@ float scaler = 1; //M_PI;
  * @param error the input error
  * @param error_deriv the derivative of the input error
  * @param dt time constant
- * @param scaler PD scaler
- * @param K_p P gain
- * @param K_i I gain
- * @param K_d D gain
+ * @param scale PD scaler
+ * @param Kp P gain
+ * @param Ki I gain
+ * @param Kd D gain
  * @param intmax Integration limit
+ * @param lerror Last error
+ * @param lderiv Last error derivative
  *
  * @return the PID control output
  */
 
-static float pid(float error, float error_deriv, uint16_t dt, float scale, float K_p, float K_i, float K_d, float intmax)
+static float pid(float error, float error_deriv, float dt, float scale, float Kp, float Ki, float Kd, float intmax, float lerror, float lderiv)
 {
-	float Kp = K_p;
-	float Ki = K_i;
-	float Kd = K_d;
 	float delta_time = dt;
-	float lerror;
 	float imax = intmax;
 	float integrator;
 	float derivative;
-	float lderiv;
 	int fCut = 20;		/* anything above 20 Hz is considered noise - low pass filter for the derivative */
 	float output = 0;
 
@@ -251,23 +282,21 @@ static float pid(float error, float error_deriv, uint16_t dt, float scale, float
 			 * discrete low pass filter, cuts out the
 			 * high frequency noise that can drive the controller crazy
 			 */
-			float RC = 1.0 / (2.0f * M_PI * fCut);
+			float RC = 1.0 / (2.0f * F_M_PI * fCut);
 			derivative = lderiv +
 				     (delta_time / (RC + delta_time)) * (derivative - lderiv);
 
 			/* update state */
-			lerror 	= error;
-			lderiv  = derivative;
+			pid_s.lerror = error;
+			pid_s.lderiv  = derivative;
 
 		} else {
-			derivative = error_deriv;
+			derivative = -error_deriv;
 		}
 
 		/* add in derivative component */
 		output 	+= Kd * derivative;
 	}
-
-	//printf("PID derivative %i\n", (int)(1000*derivative));
 
 	/* scale the P and D components with the PD scaler */
 	output *= scale;
@@ -285,9 +314,6 @@ static float pid(float error, float error_deriv, uint16_t dt, float scale, float
 
 		output += integrator;
 	}
-
-	//printf("PID Integrator %i\n", (int)(1000*integrator));
-
 	return output;
 }
 
@@ -295,21 +321,22 @@ static float pid(float error, float error_deriv, uint16_t dt, float scale, float
  * Load parameters from global storage.
  *
  * @param plane_data Fixed wing data structure
+ * @param pid_s PID structure
  *
  * Fetches the current parameters from the global parameter storage and writes them
  * to the plane_data structure
  */
 
-static void get_parameters(plane_data_t * plane_data)
+static void get_parameters(plane_data_t * plane_data, pid_s_t * pid_s)
 {
-	plane_data->Kp_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_P];
-	plane_data->Ki_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_I];
-	plane_data->Kd_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_D];
-	plane_data->Kp_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_P];
-	plane_data->Ki_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_I];
-	plane_data->Kd_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_D];
-	plane_data->intmax_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_AWU];
-	plane_data->intmax_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_AWU];
+	pid_s->Kp_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_P];
+	pid_s->Ki_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_I];
+	pid_s->Kd_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_D];
+	pid_s->Kp_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_P];
+	pid_s->Ki_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_I];
+	pid_s->Kd_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_D];
+	pid_s->intmax_att = global_data_parameter_storage->pm.param_values[PARAM_PID_ATT_AWU];
+	pid_s->intmax_pos = global_data_parameter_storage->pm.param_values[PARAM_PID_POS_AWU];
 	plane_data->airspeed =  global_data_parameter_storage->pm.param_values[PARAM_AIRSPEED];
 	plane_data->wp_x =  global_data_parameter_storage->pm.param_values[PARAM_WPLON];
 	plane_data->wp_y =  global_data_parameter_storage->pm.param_values[PARAM_WPLAT];
@@ -339,68 +366,82 @@ static void calc_body_angular_rates(float roll, float pitch, float yaw, float ro
 }
 
 /**
- *
- * Calculates the attitude angles in the body reference frame.
- *
- * Writes them to the plane data structure
- *
- * @param roll
- * @param pitch
- * @param yaw
- */
-
-static void calc_bodyframe_angles(float roll, float pitch, float yaw)
-{
-	plane_data.rollb = cosf(yaw) * cosf(pitch) * roll +
-			   (cosf(yaw) * sinf(pitch) * sinf(roll) + sinf(yaw) * cosf(roll)) * pitch
-			   + (-cosf(yaw) * sinf(pitch) * cosf(roll)  + sinf(yaw) * sinf(roll)) * yaw;
-	plane_data.pitchb = -sinf(yaw) * cosf(pitch) * roll +
-			    (-sinf(yaw) * sinf(pitch) * sinf(roll) + cosf(yaw) * cosf(roll)) * pitch
-			    + (sinf(yaw) * sinf(pitch) * cosf(roll) + cosf(yaw) * sinf(roll)) * yaw;
-	plane_data.yawb = sinf(pitch) * roll - cosf(pitch) * sinf(roll) * pitch + cosf(pitch) * cosf(roll) * yaw;
-}
-
-/**
  * calc_rotation_matrix
  *
  * Calculates the rotation matrix
  *
+ * @param rmatrix Rotation matrix structure
  * @param roll
  * @param pitch
  * @param yaw
- * @param x
- * @param y
- * @param z
  *
  */
 
-static void calc_rotation_matrix(float roll, float pitch, float yaw, float x, float y, float z)
+static void calc_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, float yaw)
 {
-	plane_data.rollb = cosf(yaw) * cosf(pitch) * x +
-			   (cosf(yaw) * sinf(pitch) * sinf(roll) + sinf(yaw) * cosf(roll)) * y
-			   + (-cosf(yaw) * sinf(pitch) * cosf(roll)  + sinf(yaw) * sinf(roll)) * z;
-	plane_data.pitchb = -sinf(yaw) * cosf(pitch) * x +
-			    (-sinf(yaw) * sinf(pitch) * sinf(roll) + cosf(yaw) * cosf(roll)) * y
-			    + (sinf(yaw) * sinf(pitch) * cosf(roll) + cosf(yaw) * sinf(roll)) * z;
-	plane_data.yawb = sinf(pitch) * x - cosf(pitch) * sinf(roll) * y + cosf(pitch) * cosf(roll) * z;
+	rmatrix->m11 = cosf(yaw) * cosf(pitch);
+	rmatrix->m12 = (cosf(yaw) * sinf(pitch) * sinf(roll) + sinf(yaw) * cosf(roll));
+	rmatrix->m13 = (-cosf(yaw) * sinf(pitch) * cosf(roll)  + sinf(yaw) * sinf(roll));
+	rmatrix->m21 = -sinf(yaw) * cosf(pitch);
+	rmatrix->m22 = (-sinf(yaw) * sinf(pitch) * sinf(roll) + cosf(yaw) * cosf(roll));
+	rmatrix->m23 = (sinf(yaw) * sinf(pitch) * cosf(roll) + cosf(yaw) * sinf(roll));
+	rmatrix->m31 = sinf(pitch);
+	rmatrix->m32 = -cosf(pitch) * sinf(roll);
+	rmatrix->m33 = cosf(pitch) * cosf(roll);
 }
+
+/**
+ * calc_angles_from_rotation_matrix
+ *
+ * Calculates the angles from a rotation matrix
+ *
+ * @param rmatrix Rotation matrix structure
+ * @param roll
+ * @param pitch
+ * @param yaw
+ *
+ */
+
+static void calc_angles_from_rotation_matrix(rmatrix_t * rmatrix, float roll, float pitch, float yaw)
+{
+	// TODO
+}
+
+/**
+ * multiply_matrices
+ *
+ * Multiply two rotation matricec
+ *
+ * @param rmatrix1 Rotation matrix 1
+ * @param rmatrix2 Rotation matrix 2
+ * @param rmatrix3 Rotation matrix output
+ *
+ *
+ */
+
+static void multiply_matrices(rmatrix_t * rmatrix1, rmatrix_t * rmatrix2, rmatrix_t * rmatrix3)
+{
+	// TODO
+}
+
 
 /**
  * calc_bearing
  *
  * Calculates the bearing error of the plane compared to the waypoints
+
+ * @param plane_data Plane data structure
  *
  * @return bearing Bearing error
  *
  */
-static float calc_bearing()
+static float calc_bearing(plane_data_t * plane_data)
 {
-	float bearing = F_M_PI/2.0f + (float)atan2(-(plane_data.wp_y - plane_data.lat), (plane_data.wp_x - plane_data.lon));
+	float bearing = F_M_PI/2.0f + atan2f(-(plane_data->wp_y - plane_data->lat), (plane_data->wp_x - plane_data->lon));
 
 	if (bearing < 0.0f) {
 		bearing += 2*F_M_PI;
 	}
-
 	return bearing;
 }
 
@@ -409,13 +450,16 @@ static float calc_bearing()
  *
  * Calculates the roll ailerons control output
  *
+ * @param plane_data Plane data structure
+ * @param pid_s PID structure
+ *
  * @return Roll ailerons control output (-1,1)
  */
 
-static float calc_roll_ail()
+static float calc_roll_ail(plane_data_t *plane_data, pid_s_t *pid_s)
 {
-	float ret = pid((plane_data.roll_setpoint - plane_data.roll), plane_data.rollspeed, PID_DT, PID_SCALER,
-			plane_data.Kp_att, plane_data.Ki_att, plane_data.Kd_att, plane_data.intmax_att);
+	float ret = pid((plane_data->roll_setpoint - plane_data->roll), plane_data->rollspeed, PID_DT, PID_SCALER,
+			pid_s->Kp_att, pid_s->Ki_att, pid_s->Kd_att, pid_s->intmax_att, pid_s->lerror, pid_s->lderiv);
 
 	if (ret < -1)
 		return -1;
@@ -431,12 +475,15 @@ static float calc_roll_ail()
  *
  * Calculates the pitch elevators control output
  *
+ * @param plane_data Plane data structure
+ * @param pid_s PID structure
+ *
  * @return Pitch elevators control output (-1,1)
  */
-static float calc_pitch_elev()
+static float calc_pitch_elev(plane_data_t *plane_data, pid_s_t * pid_s)
 {
-	float ret = pid((plane_data.pitch_setpoint - plane_data.pitch), plane_data.pitchspeed, PID_DT, PID_SCALER,
-			plane_data.Kp_att, plane_data.Ki_att, plane_data.Kd_att, plane_data.intmax_att);
+	float ret = pid((plane_data->pitch_setpoint - plane_data->pitch), plane_data->pitchspeed, PID_DT, PID_SCALER,
+			pid_s->Kp_att, pid_s->Ki_att, pid_s->Kd_att, pid_s->intmax_att, pid_s->lerror, pid_s->lderiv);
 
 	if (ret < -1)
 		return -1;
@@ -452,13 +499,15 @@ static float calc_pitch_elev()
  *
  * Calculates the yaw rudder control output (only if yaw rudder exists on the model)
  *
- * @return Yaw rudder control output (-1,1)
+ * @param plane_data Plane data structure
+ * @param pid_s PID structure
  *
+ * @return Yaw rudder control output (-1,1)
  */
-static float calc_yaw_rudder(float hdg)
+static float calc_yaw_rudder(plane_data_t *plane_data, pid_s_t *pid_s)
 {
-	float ret = pid((plane_data.yaw - abs(hdg)), plane_data.yawspeed, PID_DT, PID_SCALER,
-			plane_data.Kp_pos, plane_data.Ki_pos, plane_data.Kd_pos, plane_data.intmax_pos);
+	float ret = pid((plane_data->yaw - plane_data->yaw), plane_data->yawspeed, PID_DT, PID_SCALER,
+			pid_s->Kp_pos, pid_s->Ki_pos, pid_s->Kd_pos, pid_s->intmax_pos, pid_s->lerror, pid_s->lderiv);
 
 	if (ret < -1)
 		return -1;
@@ -474,13 +523,16 @@ static float calc_yaw_rudder(float hdg)
  *
  * Calculates the throttle control output
  *
+ * @param plane_data Plane data structure
+ * @param pid_s PID structure
+ *
  * @return Throttle control output (0,1)
  */
 
-static float calc_throttle()
+static float calc_throttle(plane_data_t * plane_data, pid_s_t *pid_s)
 {
-	float ret = pid(plane_data.throttle_setpoint - calc_gnd_speed(), 0, PID_DT, PID_SCALER,
-			plane_data.Kp_pos, plane_data.Ki_pos, plane_data.Kd_pos, plane_data.intmax_pos);
+	float ret = pid(plane_data->throttle_setpoint - calc_gnd_speed(plane_data), 0, PID_DT, PID_SCALER,
+			pid_s->Kp_pos, pid_s->Ki_pos, pid_s->Kd_pos, pid_s->intmax_pos, pid_s->lerror, pid_s->lderiv);
 
 	if (ret < 0.2f)
 		return 0.2f;
@@ -496,15 +548,17 @@ static float calc_throttle()
  *
  * Calculates the ground speed using the x and y components
  *
+ * @param plane_data Plane data structure
+ *
  * Input: none (operation on global data)
  *
  * Output: Ground speed of the plane
  *
  */
 
-static float calc_gnd_speed()
+static float calc_gnd_speed(plane_data_t * plane_data)
 {
-	float gnd_speed = sqrtf(plane_data.vx * plane_data.vx + plane_data.vy * plane_data.vy);
+	float gnd_speed = sqrtf(plane_data->vx * plane_data->vx + plane_data->vy * plane_data->vy);
 	return gnd_speed;
 }
 
@@ -513,14 +567,16 @@ static float calc_gnd_speed()
  *
  * Calculates the distance to the next waypoint
  *
+ * @param plane_data Plane data structure
+ *
  * @return the distance to the next waypoint
  *
  */
 
-static float calc_wp_distance()
+static float calc_wp_distance(plane_data_t * plane_data)
 {
-	return sqrtf((plane_data.lat - plane_data.wp_y) * (plane_data.lat - plane_data.wp_y) +
-		     (plane_data.lon - plane_data.wp_x) * (plane_data.lon - plane_data.wp_x));
+	return sqrtf((plane_data->lat - plane_data->wp_x) * (plane_data->lat - plane_data->wp_y) +
+		     (plane_data->lon - plane_data->wp_x) * (plane_data->lon - plane_data->wp_x));
 }
 
 /**
@@ -529,25 +585,28 @@ static float calc_wp_distance()
  * Calculates the offset angle for the roll plane,
  * saturates at +- 35 deg.
  *
+ * @param sp Desired setpoint
+ * @param plane_data Plane data structure
+ *
  * @return setpoint on which attitude control should stabilize while changing heading
  *
  */
 
-static float calc_roll_setpoint()
+static float calc_roll_setpoint(float sp, plane_data_t *plane_data)
 {
-	float setpoint = 0;
+	float setpoint = 0.0f;
 
-	if (plane_data.mode == TAKEOFF) {
-		setpoint = 0;
+	if (plane_data->mode == TAKEOFF) {
+		setpoint = 0.0f;
 
 	} else {
-		setpoint = calc_bearing() - plane_data.yaw;
+		setpoint = calc_bearing(&plane_data) - plane_data->yaw;
 
-		if (setpoint < (-35.0f/180.0f)*F_M_PI)
-			return (-35.0f/180.0f)*F_M_PI;
+		if (setpoint < (-sp/180.0f)*F_M_PI)
+			return (-sp/180.0f)*F_M_PI;
 
-		if (setpoint > (35/180.0f)*F_M_PI)
-			return (-35.0f/180.0f)*F_M_PI;
+		if (setpoint > (sp/180.0f)*F_M_PI)
+			return (sp/180.0f)*F_M_PI;
 	}
 
 	return setpoint;
@@ -559,25 +618,28 @@ static float calc_roll_setpoint()
  * Calculates the offset angle for the pitch plane
  * saturates at +- 35 deg.
  *
+ * @param sp Desired setpoint
+ * @param plane_data Plane data structure
+ *
  * @return setpoint on which attitude control should stabilize while changing altitude
  *
  */
 
-static float calc_pitch_setpoint()
+static float calc_pitch_setpoint(float sp, plane_data_t * plane_data)
 {
 	float setpoint = 0.0f;
 
-	if (plane_data.mode == TAKEOFF) {
-		setpoint = ((35/180.0f)*F_M_PI);
+	if (plane_data->mode == TAKEOFF) {
+		setpoint = ((sp/180.0f)*F_M_PI);
 
 	} else {
-		setpoint = atanf((plane_data.wp_z - plane_data.alt) / calc_wp_distance());
+		setpoint = atanf((plane_data->wp_z - plane_data->alt) / calc_wp_distance(plane_data));
 
-		if (setpoint < (-35.0f/180.0f)*F_M_PI)
-			return (-35.0f/180.0f)*F_M_PI;
+		if (setpoint < (-sp/180.0f)*F_M_PI)
+			return (-sp/180.0f)*F_M_PI;
 
-		if (setpoint > (35/180.0f)*F_M_PI)
-			return (-35.0f/180.0f)*F_M_PI;
+		if (setpoint > (sp/180.0f)*F_M_PI)
+			return (sp/180.0f)*F_M_PI;
 	}
 
 	return setpoint;
@@ -588,26 +650,28 @@ static float calc_pitch_setpoint()
  *
  * Calculates the throttle setpoint for different flight modes
  *
+ * @param plane_data Plane data structure
+ *
  * @return throttle output setpoint
  *
  */
 
-static float calc_throttle_setpoint()
+static float calc_throttle_setpoint(plane_data_t * plane_data)
 {
 	float setpoint = 0;
 
 	// if TAKEOFF full throttle
-	if (plane_data.mode == TAKEOFF) {
+	if (plane_data->mode == TAKEOFF) {
 		setpoint = 60.0f;
 	}
 
 	// if CRUISE - parameter value
-	if (plane_data.mode == CRUISE) {
-		setpoint = plane_data.airspeed;
+	if (plane_data->mode == CRUISE) {
+		setpoint = plane_data->airspeed;
 	}
 
 	// if LAND no throttle
-	if (plane_data.mode == LAND) {
+	if (plane_data->mode == LAND) {
 		setpoint = 0.0f;
 	}
 
@@ -617,23 +681,25 @@ static float calc_throttle_setpoint()
 /**
  * set_plane_mode
  *
+ * @param plane_data Plane data structure
+ *
  * Sets the plane mode
  * (TAKEOFF, CRUISE, LOITER or LAND)
  *
  */
 
-static void set_plane_mode()
+static void set_plane_mode(plane_data_t *plane_data)
 {
-	if (plane_data.alt < 10.0f) {
-		plane_data.mode = TAKEOFF;
+	// TODO: add flag to includes
+	if (plane_data->alt < 10.0f/* && MAV_MODE_FLAG_HIL_ENABLED == 32*/) {
+		plane_data->mode = TAKEOFF;
 
 	} else {
-		plane_data.mode = CRUISE;
+		plane_data->mode = CRUISE;
 		// TODO: if reached waypoint and no further waypoint exists, go to LOITER mode
 	}
-
-	// Debug override - don't need TAKEOFF mode for now
-	plane_data.mode = CRUISE;
+	// Debug override
+	plane_data->mode = CRUISE;
 }
 
 /*
@@ -757,9 +823,9 @@ int fixedwing_control_main(int argc, char *argv[])
 		 */
 
 		/* position values*/
-		plane_data.lat = global_pos.lat / 10000000.0;
-		plane_data.lon = global_pos.lon / 10000000.0;
-		plane_data.alt = global_pos.alt / 1000.0f;
+		plane_data.lat = global_pos.lat; /// 10000000.0;
+		plane_data.lon = global_pos.lon; /// 10000000.0;
+		plane_data.alt = global_pos.alt; /// 1000.0f;
 		plane_data.vx = global_pos.vx / 100.0f;
 		plane_data.vy = global_pos.vy / 100.0f;
 		plane_data.vz = global_pos.vz / 100.0f;
@@ -773,35 +839,35 @@ int fixedwing_control_main(int argc, char *argv[])
 		plane_data.yawspeed = att.yawspeed;
 
 		/* parameter values */
-		get_parameters(&plane_data);
+		get_parameters(&plane_data, &pid_s);
 
 		/* Attitude control part */
 
 		if (verbose && loopcounter % 20 == 0) {
 			/******************************** DEBUG OUTPUT ************************************************************/
 
-			printf("Parameter: %i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i \n", (int)plane_data.Kp_att, (int)plane_data.Ki_att,
-					(int)plane_data.Kd_att, (int)plane_data.intmax_att, (int)plane_data.Kp_pos, (int)plane_data.Ki_pos,
-					(int)plane_data.Kd_pos, (int)plane_data.intmax_pos, (int)plane_data.airspeed,
+			printf("Parameter: %i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i \n", (int)pid_s.Kp_att, (int)pid_s.Ki_att,
+					(int)pid_s.Kd_att, (int)pid_s.intmax_att, (int)pid_s.Kp_pos, (int)pid_s.Ki_pos,
+					(int)pid_s.Kd_pos, (int)pid_s.intmax_pos, (int)plane_data.airspeed,
 					(int)plane_data.wp_x, (int)plane_data.wp_y, (int)plane_data.wp_z,
 					(int)global_data_parameter_storage->pm.param_values[PARAM_WPLON],
 					(int)global_data_parameter_storage->pm.param_values[PARAM_WPLAT],
-					(int)global_data_parameter_storage->pm.param_values[PARAM_WPALT]);
+					(int)global_data_parameter_storage->pm.param_values[PARAM_WPALT],
+					global_setpoint.lat,
+					global_setpoint.lon,
+					(int)global_setpoint.altitude);
 
 			printf("PITCH SETPOINT: %i\n", (int)(100.0f*plane_data.pitch_setpoint));
 			printf("ROLL SETPOINT: %i\n", (int)(100.0f*plane_data.roll_setpoint));
-			printf("THROTTLE SETPOINT: %i\n", (int)(100.0f*calc_throttle_setpoint()));
+			printf("THROTTLE SETPOINT: %i\n", (int)(100.0f*plane_data.throttle_setpoint));
 
-	//		printf("\n\nVx: %i\t Vy: %i\t Current speed:%i\n\n", (int)plane_data.vx, (int)plane_data.vy, (int)(calc_gnd_speed()));
+			printf("\n\nVx: %i\t Vy: %i\t Current speed:%i\n\n", (int)plane_data.vx, (int)plane_data.vy, (int)(calc_gnd_speed(&plane_data)));
 
-	//		printf("Current Altitude: %i\n\n", (int)plane_data.alt);
+			printf("Current Position: \n %i \n %i \n %i \n", (int)plane_data.lat, (int)plane_data.lon, (int)plane_data.alt);
 
 			printf("\nAttitude values: \n R:%i \n P: %i \n Y: %i \n\n RS: %i \n PS: %i \n YS: %i \n ",
 					(int)(180.0f * plane_data.roll/F_M_PI), (int)(180.0f * plane_data.pitch/F_M_PI), (int)(180.0f * plane_data.yaw/F_M_PI),
 					(int)(180.0f * plane_data.rollspeed/F_M_PI), (int)(180.0f * plane_data.pitchspeed/F_M_PI), (int)(180.0f * plane_data.yawspeed)/F_M_PI);
-
-	//		printf("\nBody Rates: \n P: %i \n Q: %i \n R: %i \n",
-	//				(int)(10000 * plane_data.p), (int)(10000 * plane_data.q), (int)(10000 * plane_data.r));
 
 			printf("\nCalculated outputs: \n R: %i\n P: %i\n Y: %i\n T: %i \n",
 					(int)(10000.0f * control_outputs.roll_ailerons), (int)(10000.0f * control_outputs.pitch_elevator),
@@ -818,22 +884,27 @@ int fixedwing_control_main(int argc, char *argv[])
 		 */
 
 		/* Set plane mode */
-		set_plane_mode();
-
-		/* Calculate the P,Q,R body rates of the aircraft */
-		//calc_body_angular_rates(plane_data.roll, plane_data.pitch, plane_data.yaw,
-		//		plane_data.rollspeed, plane_data.pitchspeed, plane_data.yawspeed);
-
-		/* Calculate the body frame angles of the aircraft */
-		//calc_bodyframe_angles(plane_data.roll,plane_data.pitch,plane_data.yaw);
+		set_plane_mode(&plane_data);
 
 		/* Calculate the output values */
-		control_outputs.roll_ailerons = calc_roll_ail();
-		control_outputs.pitch_elevator = calc_pitch_elev();
-		//control_outputs.yaw_rudder = calc_yaw_rudder();
-		control_outputs.throttle = calc_throttle();
+		control_outputs.roll_ailerons = calc_roll_ail(&plane_data, &pid_s);
+		control_outputs.pitch_elevator = calc_pitch_elev(&plane_data, &pid_s);
+		control_outputs.yaw_rudder = calc_yaw_rudder(&plane_data, &pid_s);
+		control_outputs.throttle = calc_throttle(&plane_data, &pid_s);
 
-		if (rc.chan[rc.function[OVERRIDE]].scale < MANUAL) { // if we're flying in automated mode
+		/*
+		 * Calculate rotation matrices
+		 */
+		calc_rotation_matrix(&rmatrix_att, plane_data.roll, plane_data.pitch, plane_data.yaw);
+		calc_rotation_matrix(&rmatrix_c, control_outputs.roll_ailerons, control_outputs.pitch_elevator, control_outputs.yaw_rudder);
+
+		multiply_matrices(&rmatrix_att, &rmatrix_c, &rmatrix_b);
+
+		calc_angles_from_rotation_matrix(&rmatrix_b, plane_data.rollb, plane_data.pitchb, plane_data.yawb);
+
+
+		// TODO: fix RC input
+		//if (rc.chan[rc.function[OVERRIDE]].scale < MANUAL) { // if we're flying in automated mode
 
 			/*
 			 * TAKEOFF hack for HIL
@@ -846,6 +917,8 @@ int fixedwing_control_main(int argc, char *argv[])
 			}
 
 			if (plane_data.mode == CRUISE) {
+
+				// TODO: substitute output with the body angles (rollb, pitchb)
 				control.attitude_control_output[ROLL] = control_outputs.roll_ailerons;
 				control.attitude_control_output[PITCH] = control_outputs.pitch_elevator;
 				control.attitude_control_output[THROTTLE] = control_outputs.throttle;
@@ -854,46 +927,48 @@ int fixedwing_control_main(int argc, char *argv[])
 
 			control.counter++;
 			control.timestamp = hrt_absolute_time();
-		}
+		//}
 
 		/* Navigation part */
 
+		/*
+		 * TODO: APM Planner Waypoint communication
+		 */
 		// Get GPS Waypoint
 
-		//		if(global_data_wait(&global_data_position_setpoint->access_conf) == 0)
-		//		{
-		//			plane_data.wp_x = global_data_position_setpoint->x;
-		//			plane_data.wp_y = global_data_position_setpoint->y;
-		//			plane_data.wp_z = global_data_position_setpoint->z;
-		//		}
-		//		global_data_unlock(&global_data_position_setpoint->access_conf);
+		//	plane_data.wp_x = global_setpoint.lon;
+		//	plane_data.wp_y = global_setpoint.lat;
+		//	plane_data.wp_z = global_setpoint.altitude;
 
-		if (rc.chan[rc.function[OVERRIDE]].scale < MANUAL) {	// AUTO mode
+		/*
+		 * TODO: fix RC input
+		 */
+		//if (rc.chan[rc.function[OVERRIDE]].scale < MANUAL) {	// AUTO mode
 			// AUTO/HYBRID switch
 
-			if (rc.chan[rc.function[OVERRIDE]].scale < AUTO) {
-				plane_data.roll_setpoint = calc_roll_setpoint();
-				plane_data.pitch_setpoint = calc_pitch_setpoint();
-				plane_data.throttle_setpoint = calc_throttle_setpoint();
+			//if (rc.chan[rc.function[OVERRIDE]].scale < AUTO) {
+				plane_data.roll_setpoint = calc_roll_setpoint(35.0f, &plane_data);
+				plane_data.pitch_setpoint = calc_pitch_setpoint(35.0f, &plane_data);
+				plane_data.throttle_setpoint = calc_throttle_setpoint(&plane_data);
 
-			} else {
-				plane_data.roll_setpoint = rc.chan[rc.function[ROLL]].scale / 200;
-				plane_data.pitch_setpoint = rc.chan[rc.function[PITCH]].scale / 200;
-				plane_data.throttle_setpoint = rc.chan[rc.function[THROTTLE]].scale / 200;
-			}
+//			} else {
+//				plane_data.roll_setpoint = rc.chan[rc.function[ROLL]].scale / 200;
+//				plane_data.pitch_setpoint = rc.chan[rc.function[PITCH]].scale / 200;
+//				plane_data.throttle_setpoint = rc.chan[rc.function[THROTTLE]].scale / 200;
+//			}
 
 			//control_outputs.yaw_rudder = calc_yaw_rudder(plane_data.hdg);
 
-		} else {
-			control.attitude_control_output[ROLL] = rc.chan[rc.function[ROLL]].scale/10000;
-			control.attitude_control_output[PITCH] = rc.chan[rc.function[PITCH]].scale/10000;
-			control.attitude_control_output[THROTTLE] = rc.chan[rc.function[THROTTLE]].scale/10000;
+//		} else {
+//			control.attitude_control_output[ROLL] = rc.chan[rc.function[ROLL]].scale/10000;
+//			control.attitude_control_output[PITCH] = rc.chan[rc.function[PITCH]].scale/10000;
+//			control.attitude_control_output[THROTTLE] = rc.chan[rc.function[THROTTLE]].scale/10000;
 			// since we don't have a yaw rudder
-			//control->attitude_control_output[3] = global_data_rc_channels->chan[YAW].scale;
+			//control.attitude_control_output[YAW] = rc.chan[rc.function[YAW]].scale/10000;
 
 			control.counter++;
 			control.timestamp = hrt_absolute_time();
-		}
+		//}
 
 		/* publish the control data */
 
